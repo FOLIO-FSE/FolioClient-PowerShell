@@ -98,10 +98,10 @@ PrivateData = @{
         # Tags = @()
 
         # A URL to the license for this module.
-        LicenseUri = 'https://github.com/FOLIO-FSE/FolioClient-PsModule/blob/main/LICENSE'
+        LicenseUri = 'https://github.com/FOLIO-FSE/FolioClient-PowerShell/blob/main/LICENSE'
 
         # A URL to the main website for this project.
-        ProjectUri = 'https://github.com/FOLIO-FSE/FolioClient-PsModule'
+        ProjectUri = 'https://github.com/FOLIO-FSE/FolioClient-PowerShell'
 
         # A URL to an icon representing this module.
         # IconUri = ''
