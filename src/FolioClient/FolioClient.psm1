@@ -7,7 +7,7 @@
 
     .NOTES
         File Name      : FolioClient-PsModule.psm1
-        Author         : FOLIO
+        Author         : Brooks Travis
         Prerequisite   : PowerShell V5
 
     .LINK
