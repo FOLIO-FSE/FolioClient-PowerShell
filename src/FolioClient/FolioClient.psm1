@@ -109,7 +109,9 @@ class FolioClient {
         $ptr = [System.Runtime.InteropServices.Marshal]::SecureStringToCoTaskMemUnicode($this.FolioPassword)
         [string]$plainTextPassword = $null
         try {
-            # Convert the secure string to plain text
+            # Convert the secure string to plain text for authentication request.
+            # This is necessary for the FOLIO API but creates a brief plaintext window.
+            # The plaintext is immediately zeroed after use.
             $plainTextPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringUni($ptr)
         }
         finally {
@@ -161,10 +163,27 @@ class FolioClient {
     }
 
     [void]RefreshTokenIfNeeded([bool]$force) {
-        $refreshUri = [system.UriBuilder]$($this.GatewayUrl)
-        $refreshUri.Path = "/authn/refresh"
         if (((Get-Date -AsUTC) -ge $this.TokenExpiry) -or ($force)) {
-            $this.Authenticate()
+            try {
+                $refreshUri = [system.UriBuilder]$($this.GatewayUrl)
+                $refreshUri.Path = "/authn/refresh"
+                $headers = @{
+                    "x-okapi-tenant" = $this.TenantId
+                    "Content-type"   = "application/json"
+                }
+                $refreshResponse = Invoke-RestMethod -Method Post -Uri "$($refreshUri.Uri.AbsoluteUri)" -Headers $headers -WebSession $this.Session
+                $this.AuthToken = ($this.Session.Cookies.GetAllCookies() | where-object -Property "Name" -EQ "folioAccessToken").Value
+                $this.RefreshToken = ($this.Session.Cookies.GetAllCookies() | where-object -Property "Name" -EQ "folioRefreshToken").Value
+                if ($refreshResponse.accessTokenExpiration) {
+                    $this.TokenExpiry = [datetime]::Parse($refreshResponse.accessTokenExpiration)
+                }
+                if ($refreshResponse.refreshTokenExpiration) {
+                    $this.RefreshTokenExpiration = [datetime]::Parse($refreshResponse.refreshTokenExpiration)
+                }
+            } catch {
+                # If refresh fails, fall back to full authentication
+                $this.Authenticate()
+            }
         }
     }
 
@@ -205,15 +224,21 @@ class FolioClient {
                 return Invoke-RestMethod -Uri $uriString -Method $method -Headers $headers -Body $body -WebSession $this.Session
             } elseif ($method -eq "DELETE") {
                 return Invoke-RestMethod -Uri $uriString -Method $method -Headers $headers -WebSession $this.Session
+            } elseif ($method -eq "PATCH") {
+                return Invoke-RestMethod -Uri $uriString -Method $method -Headers $headers -Body $body -WebSession $this.Session
             } else {
                 throw "Unsupported HTTP method: $method"
             }
         } catch {
-            throw "Request failed: $_"
+            $errorMessage = "Request failed: $($_.Exception.Message)"
+            if ($_.Exception.InnerException) {
+                $errorMessage += " - $($_.Exception.InnerException.Message)"
+            }
+            throw $errorMessage
         }
     }
 
-    [PSCustomObject] Get([string]$endpoint, [string]$query, [hashtable]$queryParams = @{}) {
+    [PSCustomObject] Get([string]$endpoint, [hashtable]$queryParams = @{}) {
         return $this.InvokeRestMethodWithAuth($endpoint, "GET", @{}, $null, $queryParams)
     }
 
@@ -225,29 +250,112 @@ class FolioClient {
         return $this.InvokeRestMethodWithAuth($endpoint, "PUT", @{}, $body, $queryParams)
     }
 
-    [PSCustomObject] Delete([string]$endpoint, [string]$query, [hashtable]$queryParams) {
+    [PSCustomObject] Delete([string]$endpoint, [hashtable]$queryParams = @{}) {
         return $this.InvokeRestMethodWithAuth($endpoint, "DELETE", @{}, $null, $queryParams)
     }
 
-    [PSCustomObject] GetAll([string]$endpoint, [string]$key, [int]$batchsize, [int]$limit, [int]$offset = 0, [string]$query = "cql.allRecords=1 sortBy id", [hashtable]$queryParams = @{}) {
-        if (-not $queryParams.ContainsKey("query")) {
-            $queryParams["query"] = $query
+    [PSCustomObject] Patch([string]$endpoint, [object]$body, [hashtable]$queryParams = @{}) {
+        return $this.InvokeRestMethodWithAuth($endpoint, "PATCH", @{}, $body, $queryParams)
+    }
+}
+
+function Invoke-FolioGetAll {
+    <#
+        .SYNOPSIS
+            Streams records from FOLIO with automatic pagination (generator-like behavior).
+
+        .DESCRIPTION
+            Fetches records from a FOLIO endpoint in batches and yields them one at a time via the pipeline.
+            Does not accumulate all items in memory—each item is streamed as it arrives.
+
+        .PARAMETER FolioClient
+            The FolioClient instance to use for API calls.
+
+        .PARAMETER Endpoint
+            The API endpoint path (e.g., '/inventory/items').
+
+        .PARAMETER Key
+            The response key containing the records array (e.g., 'items').
+
+        .PARAMETER BatchSize
+            Number of records to fetch per API call (default 100).
+
+        .PARAMETER Limit
+            Maximum total records to return. 0 = unlimited (default 0).
+
+        .PARAMETER Offset
+            Starting record offset (default 0).
+
+        .PARAMETER Query
+            CQL query string (default 'cql.allRecords=1 sortBy id').
+
+        .PARAMETER QueryParams
+            Additional query parameters hashtable.
+
+        .OUTPUTS
+            PSCustomObject items from the FOLIO response, one per pipeline object.
+
+        .EXAMPLE
+            PS> Invoke-FolioGetAll -FolioClient $client -Endpoint '/inventory/items' -Key 'items' -Limit 1000 | ForEach-Object { Process-Item $_ }
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [FolioClient] $FolioClient,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Endpoint,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Key,
+
+        [Parameter()]
+        [int] $BatchSize = 100,
+
+        [Parameter()]
+        [int] $Limit = 0,
+
+        [Parameter()]
+        [int] $Offset = 0,
+
+        [Parameter()]
+        [string] $Query = "cql.allRecords=1 sortBy id",
+
+        [Parameter()]
+        [hashtable] $QueryParams = @{}
+    )
+
+    $queryParams["query"] = $Query
+    
+    if (($Limit -lt $BatchSize) -and ($Limit -ne 0)) {
+        $localBatchSize = $Limit
+    } else {
+        $localBatchSize = $BatchSize
+    }
+    
+    $queryParams["limit"] = $localBatchSize
+    $queryParams["offset"] = $Offset
+    $resultsCount = $localBatchSize
+    $emittedCount = 0
+    
+    while (($resultsCount -eq $localBatchSize) -and (($emittedCount -lt $Limit) -or ($Limit -eq 0))) {
+        $response = $FolioClient.Get($Endpoint, $queryParams)
+        $items = $response.$Key
+        $resultsCount = if ($null -ne $items) { $items.Count } else { 0 }
+        
+        if ($resultsCount -gt 0) {
+            foreach ($item in $items) {
+                # Stop if we've hit the limit
+                if (($Limit -gt 0) -and ($emittedCount -ge $Limit)) {
+                    return
+                }
+                # Stream the item to pipeline (no accumulation)
+                Write-Output $item
+                $emittedCount++
+            }
         }
-        if (($limit -lt $batchsize) -and ($limit -ne 0)) {
-            $batchsize = $limit
-        }
-        $queryParams["limit"] = $batchsize
-        $queryParams["offset"] = $offset
-        $resultsCount = $batchsize
-        $allItems = @()
-        while (($resultsCount -eq $batchsize) -and ($allItems.Count -lt $limit -or $limit -eq 0)) {
-            $response = $this.InvokeRestMethodWithAuth($endpoint, "GET", @{}, $null, $queryParams)
-            $resultsCount = $response.$key.Count
-            $items = $response.$key
-            $allItems += $items
-            $queryParams["offset"] += $limit
-        }
-        return $allItems
+        
+        $queryParams["offset"] += $localBatchSize
     }
 }
 
@@ -295,7 +403,7 @@ function Get-FolioClient {
         [Parameter(Mandatory = $true)]
         [string] $FolioUsername,
 
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $false)]
         [securestring] $FolioPassword,
 
         [Parameter(Mandatory = $false)]
@@ -400,7 +508,7 @@ function Get-FolioRecordsByQuery {
 
     )
 
-    $folioObjects = $FolioClient.GetAll($FolioPath, $FolioKey, $BatchSize, $Limit, $Offset, $CqlQuery, $QueryParams)
+    $folioObjects = @(Invoke-FolioGetAll -FolioClient $FolioClient -Endpoint $FolioPath -Key $FolioKey -BatchSize $BatchSize -Limit $Limit -Offset $Offset -Query $CqlQuery -QueryParams $QueryParams)
     return $folioObjects
 }
 
@@ -486,11 +594,7 @@ function Get-FolioRecordIdsByQuery {
         [int] $Offset = 0
     )
 
-    if ($Limit -eq 0) {
-        $Limit = $null
-    }
-
-    $folioObjects = $FolioClient.GetAll($FolioPath, $FolioKey, $BatchSize, $Limit, $Offset, $CqlQuery, $QueryParams)
+    $folioObjects = @(Invoke-FolioGetAll -FolioClient $FolioClient -Endpoint $FolioPath -Key $FolioKey -BatchSize $BatchSize -Limit $Limit -Offset $Offset -Query $CqlQuery -QueryParams $QueryParams)
     return $folioObjects | Select-Object -Property id
 }
 
