@@ -238,6 +238,23 @@ class FolioClient {
         }
     }
 
+    [PSCustomObject] Get([string]$endpoint, [string]$query, [hashtable]$queryParams = @{}) {
+        if (-not $queryParams) {
+            $queryParams = @{}
+        }
+
+        if ($null -ne $query -and $query -ne "") {
+            $queryParams["query"] = $query
+        }
+
+        return $this.InvokeRestMethodWithAuth($endpoint, "GET", @{}, $null, $queryParams)
+    }
+
+    [PSCustomObject] Delete([string]$endpoint, [string]$query, [hashtable]$queryParams) {
+        $fullEndpoint = if ([string]::IsNullOrEmpty($query)) { $endpoint } else { "$endpoint`?$query" }
+        return $this.Delete($fullEndpoint, $queryParams)
+    }
+    
     [PSCustomObject] Get([string]$endpoint, [hashtable]$queryParams = @{}) {
         return $this.InvokeRestMethodWithAuth($endpoint, "GET", @{}, $null, $queryParams)
     }

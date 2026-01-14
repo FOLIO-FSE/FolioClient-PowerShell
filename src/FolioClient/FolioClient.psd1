@@ -72,7 +72,7 @@ PowerShellVersion = '5.1'
 FunctionsToExport = @("Get-FolioClient", "Get-FolioRecordsByQuery", "Get-FolioRecordIdsByQuery", "Get-FolioRecordIdsToCsvByQuery", "Invoke-FolioGetAll")
 
 # Cmdlets to export from this module, for best performance, do not use wildcards and do not delete the entry, use an empty array if there are no cmdlets to export.
-CmdletsToExport = @("Get-FolioClient", "Get-FolioRecordsByQuery", "Get-FolioRecordIdsByQuery", "Get-FolioRecordIdsToCsvByQuery", "Invoke-FolioGetAll")
+CmdletsToExport = @()
 
 # Variables to export from this module
 VariablesToExport = '*'
