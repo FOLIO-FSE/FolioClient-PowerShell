@@ -136,12 +136,12 @@ For retrieving paginated results with streaming support, use the `Invoke-FolioGe
 ```powershell
 $folioClient = Get-FolioClient -GatewayUrl $url -TenantId $tenant -FolioUsername $username
 
-$items = Get-FolioRecordsByQuery `
+$items = @(Invoke-FolioGetAll `
     -FolioClient $folioClient `
-    -FolioPath "/inventory/items" `
-    -FolioKey "items" `
-    -CqlQuery '(materialTypeId=="book-material-type-id")' `
-    -Limit 0  # 0 = retrieve all
+    -Endpoint "/inventory/items" `
+    -Key "items" `
+    -Query '(materialTypeId=="book-material-type-id")' `
+    -BatchSize 100)
 
 Write-Host "Retrieved $($items.Count) items"
 ```
