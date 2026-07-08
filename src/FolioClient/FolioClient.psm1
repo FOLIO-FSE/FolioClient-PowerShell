@@ -84,10 +84,13 @@ class FolioClient {
     hidden [string]$origTenantId
     [string]$FolioUsername
     hidden [securestring]$FolioPassword
+    # Cached token values let the client send x-okapi-token directly on every request.
     [string]$AuthToken
+    # Refresh tokens and expiration timestamps let the client renew auth without re-prompting.
     [string]$RefreshToken
     [datetime]$TokenExpiry
     [datetime]$RefreshTokenExpiration
+    # The session carries FOLIO cookies so refresh calls can reuse the server-issued state.
     [Microsoft.PowerShell.Commands.WebRequestSession]$Session
     [bool]$debugMode
 
@@ -98,6 +101,7 @@ class FolioClient {
         $this.FolioUsername = $folioUsername
         $this.FolioPassword = $folioPassword
         $this.debugMode = $debugMode
+        # Authenticate up front so callers get a ready-to-use client object.
         $this.Authenticate()
     }
 
@@ -137,25 +141,20 @@ class FolioClient {
             "Content-type"   = "application/json"
         }
 
+        # login-with-expiry gives us cookie-backed refresh plus explicit expiry metadata.
+        # We'll fall back to the older login flow if the server doesn't support it, so the
+        # client can still be used.
         $this.Session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
-
-        $RTRSession = New-Object Microsoft.PowerShell.Commands.WebRequestSession
         try {
-            $authResponse = Invoke-RestMethod -Method Post -Uri "$($authUri.Uri.AbsoluteUri)" -Body $authBody -Headers $headers -SessionVariable RTRSession
-            $this.AuthToken = ($RTRSession.cookies.GetAllCookies() | where-object -Property "Name" -EQ "folioAccessToken").Value
-            $this.RefreshToken = ($RTRSession.cookies.GetAllCookies() | where-object -Property "Name" -EQ "folioRefreshToken").Value
+            $authResponse = Invoke-RestMethod -Method Post -Uri "$($authUri.Uri.AbsoluteUri)" -Body $authBody -Headers $headers -WebSession $this.Session
+            $this.AuthToken = ($this.Session.cookies.GetAllCookies() | where-object -Property "Name" -EQ "folioAccessToken").Value
+            $this.RefreshToken = ($this.Session.cookies.GetAllCookies() | where-object -Property "Name" -EQ "folioRefreshToken").Value
             $this.TokenExpiry = [datetime]::Parse($authResponse.accessTokenExpiration)
             $this.RefreshTokenExpiration = [datetime]::Parse($authResponse.refreshTokenExpiration)
-            $this.Session = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
-            foreach ($crumb in $RTRSession.Cookies.GetAllCookies()) {
-                if ($crumb.Name -ilike "%token") {
-                    $cookie = [System.Net.Cookie]::new($crumb.Name, $crumb.Value)
-                    $this.Session.Cookies.Add($this.GatewayUrl, $cookie)
-                }
-            }
         } catch {
+            # Pre-RTR auth flows only return an okapi token (pre-Ramsons)
             $authUri.Path = "/authn/login"
-            $authResponse = Invoke-RestMethod -Method Post -Uri "$($authUri.Uri.AbsoluteUri)" -Body $authBody -Headers $headers -SessionVariable RTRSession
+            $authResponse = Invoke-RestMethod -Method Post -Uri "$($authUri.Uri.AbsoluteUri)" -Body $authBody -Headers $headers -WebSession $this.Session
             $this.AuthToken = $authResponse.okapiToken
             $this.TokenExpiry = [datetime]::MaxValue
             $this.RefreshTokenExpiration = [datetime]::MaxValue
@@ -165,6 +164,7 @@ class FolioClient {
     [void]RefreshTokenIfNeeded([bool]$force) {
         if (((Get-Date -AsUTC) -ge $this.TokenExpiry) -or ($force)) {
             try {
+                # Refresh against the same session so the server sees the existing refresh cookies.
                 $refreshUri = [system.UriBuilder]$($this.GatewayUrl)
                 $refreshUri.Path = "/authn/refresh"
                 $headers = @{
@@ -191,8 +191,13 @@ class FolioClient {
         $this.RefreshTokenIfNeeded($false)
         $headers = @{
             "x-okapi-tenant" = $this.TenantId
-            "x-okapi-token"  = $this.AuthToken
             "Content-type"   = "application/json"
+        }
+        # Prefer the cookie-backed session token when one is already present.
+        # Only send x-okapi-token for flows that do not have the access token cookie yet.
+        $accessTokenCookie = $this.Session.Cookies.GetAllCookies() | Where-Object -Property "Name" -EQ "folioAccessToken"
+        if (-not $accessTokenCookie -and -not [string]::IsNullOrEmpty($this.AuthToken)) {
+            $headers["x-okapi-token"] = $this.AuthToken
         }
         return $headers
     }
